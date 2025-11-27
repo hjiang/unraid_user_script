@@ -363,7 +363,7 @@ print_summary() {
 
     # Get latest snapshot info
     local snapshot_info
-    snapshot_info=$(restic snapshots --tag "unraid-backup" --last 2>&1 || echo "Failed to get snapshot info")
+    snapshot_info=$(restic snapshots --tag "unraid-backup" --latest 1 2>&1 || echo "Failed to get snapshot info")
 
     echo "${snapshot_info}" >> "${LOG_FILE}"
     log_info "${snapshot_info}"
