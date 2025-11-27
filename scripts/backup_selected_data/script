@@ -1,5 +1,422 @@
 #!/bin/bash
+set -euo pipefail
 
-set -e
+##############################################################################
+# Unraid User Script: Backup Selected Data with Restic
+#
+# This script backs up selected directories to Backblaze B2 using restic.
+# It supports automatic retention policies, detailed logging, and error
+# notifications through Unraid's notification system.
+#
+# Configuration is loaded from an external file to keep sensitive data
+# out of the git repository.
+##############################################################################
 
-echo "hello"
+# Configuration file location (persists across Unraid reboots)
+CONFIG_FILE="${RESTIC_CONFIG_FILE:-/boot/config/restic/backup.conf}"
+
+# Log file location
+LOG_FILE="/var/log/restic_backup.log"
+
+# Maximum log file size (10MB)
+MAX_LOG_SIZE=$((10 * 1024 * 1024))
+
+##############################################################################
+# Logging Functions
+##############################################################################
+
+log() {
+    local level="$1"
+    shift
+    local message="$*"
+    local timestamp
+    timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    echo "[${timestamp}] [${level}] ${message}" | tee -a "${LOG_FILE}"
+}
+
+log_info() {
+    log "INFO" "$@"
+}
+
+log_warn() {
+    log "WARN" "$@"
+}
+
+log_error() {
+    log "ERROR" "$@"
+}
+
+##############################################################################
+# Notification Functions
+##############################################################################
+
+send_notification() {
+    local level="$1"
+    local subject="$2"
+    local message="$3"
+
+    # Only send notifications for warnings and errors
+    if [[ "${level}" == "warning" || "${level}" == "alert" ]]; then
+        if command -v /usr/local/emhttp/webGui/scripts/notify &> /dev/null; then
+            /usr/local/emhttp/webGui/scripts/notify \
+                -e "Restic Backup" \
+                -s "${subject}" \
+                -d "${message}" \
+                -i "${level}" 2>&1 | tee -a "${LOG_FILE}"
+        else
+            log_warn "Unraid notification system not available"
+        fi
+    fi
+}
+
+##############################################################################
+# Log Rotation
+##############################################################################
+
+rotate_log_if_needed() {
+    if [[ -f "${LOG_FILE}" ]]; then
+        local log_size
+        log_size=$(stat -f%z "${LOG_FILE}" 2>/dev/null || stat -c%s "${LOG_FILE}" 2>/dev/null || echo 0)
+
+        if [[ "${log_size}" -gt "${MAX_LOG_SIZE}" ]]; then
+            log_info "Rotating log file (size: ${log_size} bytes)"
+            mv "${LOG_FILE}" "${LOG_FILE}.old"
+            touch "${LOG_FILE}"
+        fi
+    else
+        touch "${LOG_FILE}"
+    fi
+}
+
+##############################################################################
+# Validation Functions
+##############################################################################
+
+check_restic_installed() {
+    if ! command -v restic &> /dev/null; then
+        log_error "restic is not installed"
+        send_notification "alert" \
+            "Restic Backup Failed" \
+            "restic command not found. Please install restic first."
+        exit 1
+    fi
+
+    local version
+    version=$(restic version | head -n1)
+    log_info "Using ${version}"
+}
+
+load_configuration() {
+    if [[ ! -f "${CONFIG_FILE}" ]]; then
+        log_error "Configuration file not found: ${CONFIG_FILE}"
+        send_notification "alert" \
+            "Restic Backup Failed" \
+            "Configuration file not found at ${CONFIG_FILE}. Please create it using the config.example template."
+        exit 1
+    fi
+
+    log_info "Loading configuration from ${CONFIG_FILE}"
+
+    # Source the configuration file
+    # shellcheck disable=SC1090
+    source "${CONFIG_FILE}"
+
+    # Validate required variables
+    local missing_vars=()
+
+    [[ -z "${B2_ACCOUNT_ID:-}" ]] && missing_vars+=("B2_ACCOUNT_ID")
+    [[ -z "${B2_ACCOUNT_KEY:-}" ]] && missing_vars+=("B2_ACCOUNT_KEY")
+    [[ -z "${RESTIC_REPOSITORY:-}" ]] && missing_vars+=("RESTIC_REPOSITORY")
+    [[ -z "${RESTIC_PASSWORD:-}" ]] && missing_vars+=("RESTIC_PASSWORD")
+
+    if [[ ${#missing_vars[@]} -gt 0 ]]; then
+        log_error "Missing required configuration variables: ${missing_vars[*]}"
+        send_notification "alert" \
+            "Restic Backup Failed" \
+            "Configuration incomplete. Missing: ${missing_vars[*]}"
+        exit 1
+    fi
+
+    # Export B2 credentials for restic
+    export B2_ACCOUNT_ID
+    export B2_ACCOUNT_KEY
+    export RESTIC_REPOSITORY
+    export RESTIC_PASSWORD
+
+    log_info "Configuration loaded successfully"
+}
+
+##############################################################################
+# Backup Configuration
+##############################################################################
+
+get_backup_paths() {
+    # Default Unraid paths (common directories to backup)
+    local default_paths=(
+        "/boot/config"           # Unraid configuration
+        "/mnt/user/appdata"      # Docker application data
+        "/mnt/user/domains"      # VM configurations
+    )
+
+    # If BACKUP_PATHS is defined in config, use it; otherwise use defaults
+    if [[ -n "${BACKUP_PATHS:-}" ]]; then
+        # Split BACKUP_PATHS by newlines or spaces
+        IFS=$'\n' read -r -d '' -a paths <<< "${BACKUP_PATHS}" || true
+        echo "${paths[@]}"
+    else
+        echo "${default_paths[@]}"
+    fi
+}
+
+get_exclude_patterns() {
+    # Default exclusions
+    local default_excludes=(
+        "*.tmp"
+        "*.temp"
+        "*.cache"
+        "*.log"
+        ".DS_Store"
+        "Thumbs.db"
+        "lost+found"
+    )
+
+    # If EXCLUDE_PATTERNS is defined in config, use it; otherwise use defaults
+    if [[ -n "${EXCLUDE_PATTERNS:-}" ]]; then
+        IFS=$'\n' read -r -d '' -a excludes <<< "${EXCLUDE_PATTERNS}" || true
+        echo "${excludes[@]}"
+    else
+        echo "${default_excludes[@]}"
+    fi
+}
+
+get_retention_policy() {
+    # Set defaults if not specified in config
+    KEEP_DAILY="${KEEP_DAILY:-7}"
+    KEEP_WEEKLY="${KEEP_WEEKLY:-4}"
+    KEEP_MONTHLY="${KEEP_MONTHLY:-12}"
+    KEEP_YEARLY="${KEEP_YEARLY:-3}"
+}
+
+##############################################################################
+# Restic Operations
+##############################################################################
+
+initialize_repository() {
+    log_info "Checking if repository needs initialization"
+
+    # Try to check if repo exists (snapshots command will fail if not initialized)
+    if ! restic snapshots &> /dev/null; then
+        log_info "Initializing new restic repository"
+
+        if restic init; then
+            log_info "Repository initialized successfully"
+        else
+            log_error "Failed to initialize repository"
+            send_notification "alert" \
+                "Restic Backup Failed" \
+                "Could not initialize repository. Check B2 credentials and repository path."
+            exit 1
+        fi
+    else
+        log_info "Repository already initialized"
+    fi
+}
+
+perform_backup() {
+    local backup_paths=()
+    IFS=' ' read -r -a backup_paths <<< "$(get_backup_paths)"
+
+    local exclude_patterns=()
+    IFS=' ' read -r -a exclude_patterns <<< "$(get_exclude_patterns)"
+
+    log_info "Starting backup of ${#backup_paths[@]} paths"
+
+    # Build exclude arguments
+    local exclude_args=()
+    for pattern in "${exclude_patterns[@]}"; do
+        exclude_args+=("--exclude" "${pattern}")
+    done
+
+    # Verify paths exist
+    local valid_paths=()
+    for path in "${backup_paths[@]}"; do
+        if [[ -e "${path}" ]]; then
+            valid_paths+=("${path}")
+            log_info "  - ${path}"
+        else
+            log_warn "Skipping non-existent path: ${path}"
+        fi
+    done
+
+    if [[ ${#valid_paths[@]} -eq 0 ]]; then
+        log_error "No valid backup paths found"
+        send_notification "warning" \
+            "Restic Backup Warning" \
+            "No valid backup paths found. Check your configuration."
+        exit 1
+    fi
+
+    # Perform the backup
+    local backup_output
+    local backup_exit_code=0
+
+    backup_output=$(restic backup \
+        "${exclude_args[@]}" \
+        --verbose \
+        --tag "unraid-backup" \
+        --tag "$(hostname)" \
+        "${valid_paths[@]}" 2>&1) || backup_exit_code=$?
+
+    echo "${backup_output}" >> "${LOG_FILE}"
+
+    if [[ ${backup_exit_code} -eq 0 ]]; then
+        log_info "Backup completed successfully"
+
+        # Extract statistics from output
+        local files_new
+        local files_changed
+        local files_unmodified
+        local bytes_added
+
+        files_new=$(echo "${backup_output}" | grep "Added to the repository:" -A3 | grep "new files" | awk '{print $1}' || echo "N/A")
+        files_changed=$(echo "${backup_output}" | grep "changed files" | awk '{print $1}' || echo "N/A")
+        files_unmodified=$(echo "${backup_output}" | grep "unmodified files" | awk '{print $1}' || echo "N/A")
+        bytes_added=$(echo "${backup_output}" | grep "Added to the repository:" | awk '{print $5, $6}' || echo "N/A")
+
+        log_info "Backup statistics:"
+        log_info "  - New files: ${files_new}"
+        log_info "  - Changed files: ${files_changed}"
+        log_info "  - Unmodified files: ${files_unmodified}"
+        log_info "  - Data added: ${bytes_added}"
+    else
+        log_error "Backup failed with exit code ${backup_exit_code}"
+        send_notification "alert" \
+            "Restic Backup Failed" \
+            "Backup operation failed. Check ${LOG_FILE} for details."
+        exit 1
+    fi
+}
+
+apply_retention_policy() {
+    get_retention_policy
+
+    log_info "Applying retention policy"
+    log_info "  - Keep daily: ${KEEP_DAILY}"
+    log_info "  - Keep weekly: ${KEEP_WEEKLY}"
+    log_info "  - Keep monthly: ${KEEP_MONTHLY}"
+    log_info "  - Keep yearly: ${KEEP_YEARLY}"
+
+    local forget_output
+    local forget_exit_code=0
+
+    forget_output=$(restic forget \
+        --keep-daily "${KEEP_DAILY}" \
+        --keep-weekly "${KEEP_WEEKLY}" \
+        --keep-monthly "${KEEP_MONTHLY}" \
+        --keep-yearly "${KEEP_YEARLY}" \
+        --tag "unraid-backup" \
+        --prune \
+        --verbose 2>&1) || forget_exit_code=$?
+
+    echo "${forget_output}" >> "${LOG_FILE}"
+
+    if [[ ${forget_exit_code} -eq 0 ]]; then
+        log_info "Retention policy applied successfully"
+
+        # Extract removed snapshots count
+        local removed_snapshots
+        removed_snapshots=$(echo "${forget_output}" | grep -c "remove snapshot" || echo "0")
+        log_info "  - Removed ${removed_snapshots} old snapshot(s)"
+    else
+        log_warn "Failed to apply retention policy (exit code ${forget_exit_code})"
+        send_notification "warning" \
+            "Restic Backup Warning" \
+            "Retention policy failed to apply. Backup succeeded but old snapshots may not be cleaned up."
+    fi
+}
+
+check_repository_health() {
+    log_info "Checking repository health"
+
+    local check_output
+    local check_exit_code=0
+
+    # Run check with --read-data-subset to verify some data (not full check for performance)
+    check_output=$(restic check --read-data-subset=5% 2>&1) || check_exit_code=$?
+
+    echo "${check_output}" >> "${LOG_FILE}"
+
+    if [[ ${check_exit_code} -eq 0 ]]; then
+        log_info "Repository health check passed"
+    else
+        log_warn "Repository health check failed (exit code ${check_exit_code})"
+        send_notification "warning" \
+            "Restic Repository Warning" \
+            "Repository health check failed. Data may be corrupted."
+    fi
+}
+
+print_summary() {
+    log_info "=========================================="
+    log_info "Backup Summary"
+    log_info "=========================================="
+
+    # Get latest snapshot info
+    local snapshot_info
+    snapshot_info=$(restic snapshots --tag "unraid-backup" --last 2>&1 || echo "Failed to get snapshot info")
+
+    echo "${snapshot_info}" >> "${LOG_FILE}"
+    log_info "${snapshot_info}"
+
+    log_info "=========================================="
+}
+
+##############################################################################
+# Main Execution
+##############################################################################
+
+main() {
+    local start_time
+    start_time=$(date '+%s')
+
+    log_info "=========================================="
+    log_info "Restic Backup Starting"
+    log_info "=========================================="
+
+    # Rotate log if needed
+    rotate_log_if_needed
+
+    # Validation
+    check_restic_installed
+    load_configuration
+
+    # Initialize repository if needed
+    initialize_repository
+
+    # Perform backup
+    perform_backup
+
+    # Apply retention policy
+    apply_retention_policy
+
+    # Check repository health (optional, can be disabled for faster backups)
+    if [[ "${ENABLE_HEALTH_CHECK:-true}" == "true" ]]; then
+        check_repository_health
+    fi
+
+    # Print summary
+    print_summary
+
+    local end_time
+    end_time=$(date '+%s')
+    local duration=$((end_time - start_time))
+
+    log_info "Backup completed in ${duration} seconds"
+    log_info "=========================================="
+}
+
+# Trap errors and send notification
+trap 'log_error "Script failed at line $LINENO"; send_notification "alert" "Restic Backup Failed" "Script encountered an unexpected error at line $LINENO. Check ${LOG_FILE} for details."; exit 1' ERR
+
+# Run main function
+main "$@"

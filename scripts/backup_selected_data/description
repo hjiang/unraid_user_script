@@ -1,0 +1,1 @@
+Backup selected directories to Backblaze B2 using restic with automatic retention and error notifications

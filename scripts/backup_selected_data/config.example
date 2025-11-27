@@ -1,0 +1,145 @@
+##############################################################################
+# Restic Backup Configuration
+#
+# Copy this file to: /boot/config/restic/backup.conf
+# (The /boot directory persists across Unraid reboots)
+#
+# SECURITY NOTE: Keep this file secure! It contains sensitive credentials.
+# Recommended permissions: chmod 600 /boot/config/restic/backup.conf
+##############################################################################
+
+##############################################################################
+# REQUIRED: Backblaze B2 Configuration
+##############################################################################
+
+# Your Backblaze B2 Account ID (Application Key ID)
+# Get this from: https://secure.backblaze.com/app_keys.htm
+B2_ACCOUNT_ID="your_b2_account_id_here"
+
+# Your Backblaze B2 Application Key
+# Get this from: https://secure.backblaze.com/app_keys.htm
+B2_ACCOUNT_KEY="your_b2_application_key_here"
+
+##############################################################################
+# REQUIRED: Restic Repository Configuration
+##############################################################################
+
+# Restic repository location (B2 bucket)
+# Format: b2:bucket-name:path/to/repo
+# Example: b2:my-backup-bucket:unraid-backups
+# Note: The bucket must exist before running the backup
+RESTIC_REPOSITORY="b2:your-bucket-name:unraid-backups"
+
+# Restic repository password (encryption password)
+# This encrypts your backup data. Keep it safe!
+# WARNING: If you lose this password, you cannot restore your backups!
+RESTIC_PASSWORD="your_strong_password_here"
+
+##############################################################################
+# OPTIONAL: Backup Paths
+##############################################################################
+
+# Directories to backup (one per line)
+# If not specified, defaults to:
+#   - /boot/config (Unraid configuration)
+#   - /mnt/user/appdata (Docker application data)
+#   - /mnt/user/domains (VM configurations)
+#
+# Uncomment and customize as needed:
+# BACKUP_PATHS="
+# /boot/config
+# /mnt/user/appdata
+# /mnt/user/domains
+# /mnt/user/important-data
+# "
+
+##############################################################################
+# OPTIONAL: Exclude Patterns
+##############################################################################
+
+# Files/directories to exclude from backup (one per line)
+# If not specified, defaults exclude temp files, caches, and logs
+#
+# Uncomment and customize as needed:
+# EXCLUDE_PATTERNS="
+# *.tmp
+# *.temp
+# *.cache
+# *.log
+# .DS_Store
+# Thumbs.db
+# lost+found
+# node_modules
+# __pycache__
+# "
+
+##############################################################################
+# OPTIONAL: Retention Policy
+##############################################################################
+
+# How many snapshots to keep
+# These settings determine how long your backups are retained
+# Restic will automatically delete older snapshots beyond these limits
+
+# Number of daily backups to keep (default: 7)
+KEEP_DAILY="7"
+
+# Number of weekly backups to keep (default: 4)
+KEEP_WEEKLY="4"
+
+# Number of monthly backups to keep (default: 12)
+KEEP_MONTHLY="12"
+
+# Number of yearly backups to keep (default: 3)
+KEEP_YEARLY="3"
+
+##############################################################################
+# OPTIONAL: Advanced Options
+##############################################################################
+
+# Enable repository health check after backup (default: true)
+# Set to "false" to skip health checks for faster backups
+# Health checks verify repository integrity but add time
+ENABLE_HEALTH_CHECK="true"
+
+##############################################################################
+# Setup Instructions
+##############################################################################
+#
+# 1. Create a Backblaze B2 account at https://www.backblaze.com/b2/
+#
+# 2. Create a B2 bucket for your backups:
+#    - Log in to B2 console
+#    - Click "Create a Bucket"
+#    - Choose a unique bucket name (e.g., "unraid-backups-yourname")
+#    - Set to "Private" (recommended for security)
+#
+# 3. Create an Application Key:
+#    - Go to "App Keys" in B2 console
+#    - Click "Add a New Application Key"
+#    - Give it a descriptive name (e.g., "Unraid Restic Backup")
+#    - Set access to your backup bucket only (recommended)
+#    - Save the Application Key ID and Application Key
+#
+# 4. Install restic on your Unraid server:
+#    - Option A: Use Nerd Tools plugin (recommended)
+#    - Option B: Download from https://restic.net/
+#
+# 5. Copy this file to /boot/config/restic/backup.conf:
+#    mkdir -p /boot/config/restic
+#    cp config.example /boot/config/restic/backup.conf
+#
+# 6. Edit the configuration file with your credentials:
+#    nano /boot/config/restic/backup.conf
+#
+# 7. Set secure permissions on the config file:
+#    chmod 600 /boot/config/restic/backup.conf
+#
+# 8. Test the backup manually before scheduling:
+#    Run the script from Unraid User Scripts interface
+#
+# 9. Schedule the backup (optional):
+#    - In User Scripts, set schedule (e.g., "Daily" or "Custom: 0 2 * * *")
+#    - Recommended: Run during off-peak hours (e.g., 2 AM)
+#
+##############################################################################
