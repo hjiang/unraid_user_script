@@ -272,22 +272,11 @@ perform_backup() {
     if [[ ${backup_exit_code} -eq 0 ]]; then
         log_info "Backup completed successfully"
 
-        # Extract statistics from output
-        local files_new
-        local files_changed
-        local files_unmodified
-        local bytes_added
-
-        files_new=$(echo "${backup_output}" | grep "Added to the repository:" -A3 | grep "new files" | awk '{print $1}' || echo "N/A")
-        files_changed=$(echo "${backup_output}" | grep "changed files" | awk '{print $1}' || echo "N/A")
-        files_unmodified=$(echo "${backup_output}" | grep "unmodified files" | awk '{print $1}' || echo "N/A")
-        bytes_added=$(echo "${backup_output}" | grep "Added to the repository:" | awk '{print $5, $6}' || echo "N/A")
-
+        # Show restic's summary output directly
         log_info "Backup statistics:"
-        log_info "  - New files: ${files_new}"
-        log_info "  - Changed files: ${files_changed}"
-        log_info "  - Unmodified files: ${files_unmodified}"
-        log_info "  - Data added: ${bytes_added}"
+        echo "${backup_output}" | grep -E "^(Files|Dirs|Added to the repository):" | while IFS= read -r line; do
+            log_info "  ${line}"
+        done
     else
         log_error "Backup failed with exit code ${backup_exit_code}"
         send_notification "alert" \
